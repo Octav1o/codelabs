@@ -162,20 +162,109 @@ class _TFServingDemoState extends State<TFServingDemo> {
       _server = '127.0.0.1';
     }
     // TODO: build _vocabMap if empty
+    if (_vocabMap.isEmpty) {
+      final vocabFileString = await rootBundle.loadString(vocabFile);
+      final lines = vocabFileString.split('\n');
+      for (final l in lines) {
+        if (l != "") {
+          var wordAndIndex = l.split(' ');
+          (_vocabMap)[wordAndIndex[0]] = int.parse(wordAndIndex[1]);
+        }
+      }
+    }
 
     // TODO: tokenize the input sentence.
+    final inputWords = _inputSentenceController.text
+        .toLowerCase()
+        .replaceAll(RegExp('[^a-z ]'), '')
+        .split(' ');
+// Initialize with padding token.
+    _tokenIndices = List.filled(maxSentenceLength, 0);
+    var i = 0;
+    for (final w in inputWords) {
+      if ((_vocabMap).containsKey(w)) {
+        _tokenIndices[i] = (_vocabMap)[w]!;
+        i++;
+      }
+
+      // Truncate the string if longer than maxSentenceLength.
+      if (i >= maxSentenceLength - 1) {
+        break;
+      }
+    }
 
     if (_connectionMode == ConnectionModeType.rest) {
       // TODO: create and send the REST request
+      final response = await http.post(
+        Uri.parse('http://' +
+            _server +
+            ':' +
+            restPort.toString() +
+            '/v1/models/' +
+            modelName +
+            ':predict'),
+        body: jsonEncode(<String, List<List<int>>>{
+          'instances': [_tokenIndices],
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        Map<String, dynamic> result =
+            jsonDecode(response.body) as Map<String, dynamic>;
+        if ((result['predictions']![0][1] as double) >=
+            classificationThreshold) {
+          return 'This sentence is spam. Spam score is ' +
+              result['predictions']![0][1].toString();
+        }
+        return 'This sentence is not spam. Spam score is ' +
+            result['predictions']![0][1].toString();
+      } else {
+        throw Exception('Error response');
+      }
 
       // TODO: process the REST response
     } else {
-      // TODO: create the gRPC request
+      final channel = ClientChannel(_server,
+          port: grpcPort,
+          options:
+              const ChannelOptions(credentials: ChannelCredentials.insecure()));
+      _stub = PredictionServiceClient(channel,
+          options: CallOptions(timeout: const Duration(seconds: 10)));
 
-      // TODO: send the gRPC request
+      ModelSpec modelSpec = ModelSpec(
+        name: 'spam-detection',
+        signatureName: 'serving_default',
+      );
 
-      // TODO: process the gRPC response
+      TensorShapeProto_Dim batchDim = TensorShapeProto_Dim(size: Int64(1));
+      TensorShapeProto_Dim inputDim =
+          TensorShapeProto_Dim(size: Int64(maxSentenceLength));
+      TensorShapeProto inputTensorShape =
+          TensorShapeProto(dim: [batchDim, inputDim]);
+      TensorProto inputTensor = TensorProto(
+          dtype: DataType.DT_INT32,
+          tensorShape: inputTensorShape,
+          intVal: _tokenIndices);
+
+      // If you train your own model, make sure to update the input and output
+      // tensor names.
+      const inputTensorName = 'input_3';
+      const outputTensorName = 'dense_5';
+      PredictRequest request = PredictRequest(
+          modelSpec: modelSpec, inputs: {inputTensorName: inputTensor});
+
+      PredictResponse response = await _stub.predict(request);
+
+      if (response.outputs.containsKey(outputTensorName)) {
+        if (response.outputs[outputTensorName]!.floatVal[1] >
+            classificationThreshold) {
+          return 'This sentence is spam. Spam score is ${response.outputs[outputTensorName]!.floatVal[1]}';
+        } else {
+          return 'This sentence is not spam. Spam score is ${response.outputs[outputTensorName]!.floatVal[1]}';
+        }
+      } else {
+        throw Exception('Error response');
+      }
     }
-    return '';
   }
 }
